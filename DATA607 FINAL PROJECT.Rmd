@@ -1,0 +1,475 @@
+---
+title: "DATA607 FINAL PROJECT"
+author: "Gullit Navarrete"
+date: "2025-05-16"
+output: html_document
+---
+
+# Abstract
+Across the world and still lingering into the modern age, Human trafficking is a pervasive crime that ensnares people of every age, gender, and background in forced labor, commercial sex, and other formats alike to modern slavery. Today, it’s estimated that 27.6 million individuals suffer under trafficking conditions. Perpetrators aren’t limited to organized criminal networks, in fact some world powers and governments secretly obtain these victims including children into exploitative labor or other illicit activities. Given the global scale and severity of this injustice, it demands urgent attention and collective action to stem its spread and protect vulnerable populations.
+
+# Introduction
+The first data source, a .CSV file, was downloaded from the United Nations Office on Drugs and Crime (UNDOC) website: https://dataunodc.un.org/dp-trafficking-persons This data was collected by using the Questionnaire for the Global Report on Trafficking in Persons (GLOTIP), hence the name of the original file being "data_glotip".
+
+The second data source, via web scraping and using the initial source as an API, was found from the US Human Trafficking Hotline: https://humantraffickinghotline.org/en/statistics 
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(readr)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(rvest)
+library(stringr)
+library(maps)
+library(viridis)
+library(gridExtra)
+set.seed(1234)
+```
+
+# Data Science Workflow
+## Data Import: 
+The .CSV was downloaded from the United Nations Office on Drugs and Crime (UNDOC) website and read into R.
+
+The API for the US Human Trafficking Hotline is imported with a rvest approach, because the website/source doesn’t expose those year-by-year numbers via a neat JSON endpoint. So therefore, I scraped out the data using rvest by reading the website into R, then grabbing each year's panel and extracting.
+
+## Data Transformation:
+After importing both the UNODC CSV and the scraped Hotline data, I tidied each dataset into a common “long” format and harmonized their key fields. For the UNODC table, I filtered to only U.S. rows, “Detected trafficking victims,” and total Sex/Age dimensions, then renamed columns for clarity. For the Hotline data, I will first removed the redundant “Unit of measurement” column (all entries were “Counts” anyways), renamed Iso3_code to Abbreviation (which is basically a 3-4 letter code for a country) and txtVALUE to Count, and converted “<5” into a numeric midpoint value of 2 before parsing each text string to a number. I will then removed the placeholder “NA” panel (the 2007–2014 aggregate) and filter out any remaining NA years, producing two clean, year-indexed time series ready for combined analysis.
+
+## Data Analysis: 
+The research questions; 1. What is the difference in counts between the UNODC vs. the US Human Trafficking Hotline 2. What are some trends over time for gender and/or age? 3. What are the results of t-tests that compare males to females and ages 17 and less to ages 18 and older? would be answered using summary statistics as well as visualizing the data to answer these questions. For the final research question: "How can you use a linear regression line to determine an average number of people in human trafficking (across all countries and in the United States) for each of the following: Males 17 or younger, males 18 or older, females 17 or younger, and females 18 or older" I'll be using linear regression as a analytical method to predict.
+
+# Data Import
+```{r load-data}
+github <- "https://raw.githubusercontent.com/GullitNa/DATA607FINAL/main/data_glotip.csv"
+data_glotip <- read.csv(
+  github,
+  skip = 2,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+head(data_glotip)
+```
+
+```{r}
+unique(data_glotip$`Unit of measurement`)
+```
+Only has Counts so I'll remove this column in Data Transformation.
+
+```{r}
+url <- "https://humantraffickinghotline.org/en/statistics"
+page <- read_html(url)
+panels <- page %>% html_nodes("section.js-tabs-panel")
+
+ids   <- panels %>% html_attr("id")
+years <- as.integer(str_remove(ids, "^year\\-")) 
+counts <- lapply(panels, function(p) {
+  p %>% 
+    html_nodes(".text-h1.font-black") %>% 
+    html_text(trim = TRUE) %>%
+    str_remove_all(",") %>%
+    as.integer()
+})
+
+yearly_stats <- data.frame(
+  Year               = years,
+  Signals_Received   = sapply(counts, `[`, 1),
+  Victim_Signals     = sapply(counts, `[`, 2),
+  Cases_Identified   = sapply(counts, `[`, 3),
+  Victims            = sapply(counts, `[`, 4),
+  row.names = NULL
+)
+yearly_stats
+```
+Remove the "NA" year (2007-2014)
+```{r}
+yearly_stats <- yearly_stats %>% 
+  filter(!is.na(Year))
+```
+
+# Data Transformation
+For the .CSV file, I'll begin by checking if the "Unit of measurement" column confirms my suspicion of only having "Counts". If so, then I'll remove it as it is a repetitive column.
+```{r}
+unique(data_glotip$`Unit of measurement`)
+```
+Confirmed that the column literally only has "Counts". 
+```{r}
+glotip <- data_glotip %>%
+  rename(
+    Abbreviation = Iso3_code,  # rename country‐code
+    Count        = txtVALUE    # rename the value column
+  ) %>%
+  select(
+    -`Unit of measurement`     # drop the one‐only “Counts” column
+  ) %>%
+  mutate(
+    Count = parse_number(Count, na = "<5")  # turn "<5" into NA, "1,234" → 1234
+  )
+
+# peek
+head(glotip)
+```
+
+Change the "NA" values in Counts to be the midpoint (2) on average instead of just throwing away the data entirely in analysis
+```{r}
+glotip <- glotip %>%
+  mutate(
+    Count = replace_na(Count, 2)
+  )
+```
+
+```{r}
+us_victims <- glotip %>%
+  filter(
+    Country   == "United States of America",
+    Indicator == "Detected trafficking victims",
+    Dimension == "Total",
+    Sex       == "Total",
+    Age       == "Total"
+  ) %>%
+  group_by(Year) %>%
+  summarize(
+    UNODC_Victims_US = sum(Count),
+    .groups = "drop"
+  )
+
+# 3) Clean up the scraped hotline stats and drop that NA‐year row
+yearly_stats_clean <- yearly_stats %>%
+  filter(!is.na(Year)) %>%
+  rename(Hotline_Victims = Victims)
+
+# 4) Stitch them together on Year
+combined <- yearly_stats_clean %>%
+  inner_join(us_victims, by = "Year")
+
+# peek
+combined
+```
+
+# Data Analysis
+## Hotline vs. UNODC every year
+Now you truly have two datasets in one analysis—compare the hotline’s identified victims against the UNODC’s official counts:
+```{r}
+ggplot(combined, aes(x = Year)) +
+  geom_line(aes(y = Hotline_Victims, color = "Hotline")) +
+  geom_line(aes(y = UNODC_Victims_US, color = "UNODC")) +
+  labs(
+    y = "Number of Victims",
+    color = "Source",
+    title = "U.S. Trafficking Victims: Hotline vs. UNODC"
+  ) +
+  scale_color_manual(values = c("Hotline" = "steelblue", "UNODC" = "firebrick"))
+```
+
+The Hotline’s total victims curve sits well above the UNODC’s. This is possible because the Hotline is picking up substantially more “signals” or potential victim reports than what shows up in the UNODC’s official national totals—often by a factor of two or more.
+UNODC data comes from country reports, law enforcement and government agencies, aggregated and vetted before publication. There may be "definition" differences between different countries and cultures.
+
+Hotline data is “real-time” outreach: it includes any contact (calls, texts, chats) that meet the trafficking-victim criteria, even if those never end up as formally “identified” cases in government statistics.
+
+**What does this counting gap mean?**
+Under-reporting in official channels: many victims never come to the attention of law enforcement but do make it to the Hotline.
+
+## Trends
+### Sex/Gender
+```{r}
+df_totals <- glotip %>% 
+  filter(
+    Indicator == "Detected trafficking victims", 
+    Dimension == "Total"
+  )
+gender_trend <- df_totals %>%
+  filter(Age == "Total") %>%
+  group_by(Year, Sex) %>%
+  summarize(Victims = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# FOR PLOTTING ONLY
+gender_plot_df <- gender_trend %>%
+  filter(Sex %in% c("Female", "Male"))
+
+ggplot(gender_plot_df, aes(x = Year, y = Victims, color = Sex)) +
+  geom_line(size = 1) +
+  geom_point() +
+  scale_x_continuous(
+    breaks = unique(gender_plot_df$Year),
+    labels = function(x) sprintf("%02d", x %% 100) #better year clarity
+  ) +
+  labs(
+    title = "Global Trend of Trafficking Victims by Sex",
+    x     = "Year",
+    y     = "Total Victims"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+gender_summary <- gender_trend %>%
+  group_by(Sex) %>%
+  summarize(
+    Total_Victims = sum(Victims, na.rm = TRUE),
+    .groups = "drop"
+  )
+gender_summary
+```
+In total counts and consistently every year, there are more female victims of human trafficking than males.
+
+### Age
+```{r}
+age_trend <- df_totals %>%
+  filter(Sex == "Total") %>% 
+  group_by(Year, Age) %>%
+  summarize(Victims = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# PLOTTING ONLY
+age_plot_df <- age_trend %>%
+  filter(Age %in% c("0 to 17 years", "18 years or over"))
+ggplot(age_plot_df, aes(x = Year, y = Victims, color = Age)) +
+  geom_line(size = 1) +
+  geom_point() +
+  scale_x_continuous(
+    breaks = unique(age_plot_df$Year),
+    labels = function(x) sprintf("%02d", x %% 100)
+  ) +
+  labs(
+    title = "Global Trend of Trafficking Victims by Age Group",
+    x     = "Year",
+    y     = "Total Victims",
+    color = "Age Group"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+age_summary <- age_trend %>%
+  group_by(Age) %>%
+  summarize(Total_Victims = sum(Victims, na.rm = TRUE), .groups = "drop")
+age_summary
+```
+
+According to the graph and summary statistics, the victims of human trafficking tend to come from the age group "18 or over" more so than those who come from the age group "0 to 17 years" or 17 or younger.
+
+## Victims by Country (Map Visual)
+```{r}
+country_totals <- glotip %>%
+  group_by(Country, Sex, Age) %>%
+  summarize(Victims = sum(Count, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Country = recode(Country,
+    `United States of America` = "USA",
+    `Russian Federation` = "Russia",
+    `Antigua and Barbuda` = "Antigua and Barbuda",
+    `Bolivia (Plurinational State of)` = "Bolivia",
+    `Brunei Darussalam` = "Brunei",
+    `Cabo Verde` = "Cape Verde",
+    `China, Hong Kong Special Administrative Region` = "Hong Kong",
+    `China, Macao Special Administrative Region` = "Macau",
+    `Congo` = "Republic of the Congo",
+    `Curaçao` = "Curacao",
+    `Czechia` = "Czech Republic",
+    `Côte d’Ivoire` = "Ivory Coast",
+    `Eswatini` = "Swaziland",
+    `Holy See` = "Vatican City",
+    `Iran (Islamic Republic of)` = "Iran",
+    `Lao People's Democratic Republic` = "Laos",
+    `Micronesia (Federated States of)` = "Micronesia",
+    `Netherlands (Kingdom of the)` = "Netherlands",
+    `Republic of Korea` = "South Korea",
+    `Republic of Moldova` = "Moldova",
+    `Saint Kitts and Nevis` = "Saint Kitts and Nevis",
+    `Saint Vincent and the Grenadines` = "Saint Vincent and the Grenadines",
+    `Syrian Arab Republic` = "Syria",
+    `Trinidad and Tobago` = "Trinidad and Tobago",
+    `Türkiye` = "Turkey",
+    `United Kingdom of Great Britain and Northern Ireland` = "UK",
+    `United Republic of Tanzania` = "Tanzania",
+    `Venezuela (Bolivarian Republic of)` = "Venezuela",
+    .default = Country
+    )
+  )
+world_outline <- map_data("world") %>%
+  rename(Country = region)
+
+plot_choro <- function(sex, age, title){
+  df_map <- country_totals %>%
+    filter(Sex == sex, Age == age)
+
+  map_df <- left_join(world_outline, df_map, by = "Country")
+
+  ggplot(map_df, aes(long, lat, group = group, fill = Victims)) +
+    geom_polygon(color = "gray80", size = 0.1) +
+    coord_quickmap() +
+    scale_fill_viridis_c(na.value = "white", option = "plasma") +
+    labs(
+      title = title,
+      fill  = "Victims"
+    ) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 14)
+    )
+}
+
+p1 <- plot_choro("Male",   "0 to 17 years",       "Number of Male Victims 17 or Younger by Country")
+p2 <- plot_choro("Female", "0 to 17 years",       "Number of Female Victims 17 or Younger by Country")
+p3 <- plot_choro("Male",   "18 years or over",    "Number of Male Victims 18 or Older by Country")
+p4 <- plot_choro("Female", "18 years or over",    "Number of Female Victims 18 or Older by Country")
+
+p1
+```
+
+```{r}
+p2
+```
+
+```{r}
+p3
+```
+
+```{r}
+p4
+```
+
+
+```{r}
+world_outline <- map_data("world") %>% rename(Country = region)
+joined   <- left_join(world_outline, country_totals, by="Country")
+```
+Check what is mismatched by the maps_data country names/spelling
+```{r}
+unmatched <- anti_join(country_totals, world_outline, by="Country")
+unique(unmatched$Country)
+```
+Manually recode 
+```{r}
+country_totals_clean <- country_totals %>%
+  mutate(
+    Country = recode(Country,
+      `Antigua and Barbuda` = "Antigua and Barbuda",
+      `Bolivia (Plurinational State of)` = "Bolivia",
+      `Brunei Darussalam` = "Brunei",
+      `Cabo Verde` = "Cape Verde",
+      `China, Hong Kong Special Administrative Region` = "Hong Kong",
+      `China, Macao Special Administrative Region` = "Macau",
+      `Congo` = "Republic of the Congo",
+      `Curaçao` = "Curacao",
+      `Czechia` = "Czech Republic",
+      `Côte d’Ivoire` = "Ivory Coast",
+      `Eswatini` = "Swaziland",
+      `Holy See` = "Vatican City",
+      `Iran (Islamic Republic of)` = "Iran",
+      `Lao People's Democratic Republic` = "Laos",
+      `Micronesia (Federated States of)` = "Micronesia",
+      `Netherlands (Kingdom of the)` = "Netherlands",
+      `Republic of Korea` = "South Korea",
+      `Republic of Moldova` = "Moldova",
+      `Saint Kitts and Nevis` = "Saint Kitts and Nevis",
+      `Saint Vincent and the Grenadines` = "Saint Vincent and the Grenadines",
+      `Syrian Arab Republic` = "Syria",
+      `Trinidad and Tobago` = "Trinidad and Tobago",
+      `Türkiye` = "Turkey",
+      `United Kingdom of Great Britain and Northern Ireland` = "UK",
+      `United Republic of Tanzania` = "Tanzania",
+      `Venezuela (Bolivarian Republic of)` = "Venezuela",
+      .default = Country
+    )
+  )
+```
+
+## T-test
+### Difference between Sex/Gender
+First t-test will be on the topic of these hypothesis:
+Null Hypothesis: “Males and females are victims of human trafficking in equal numbers.”
+Alternative Hypothesis: “Males and females are victims of human trafficking in different amounts.”
+```{r}
+sex_totals <- glotip %>%
+  filter(Dimension == "Total",
+         Age       == "Total",
+         Sex %in% c("Male","Female")) %>%
+  group_by(Country, Year, Sex) %>%
+  summarize(Victims = sum(Count, na.rm=TRUE), .groups="drop") %>%
+  pivot_wider(names_from = Sex,
+              values_from = Victims) %>%
+  filter(!is.na(Male), !is.na(Female))
+t_sex <- t.test(sex_totals$Male,
+                sex_totals$Female,
+                paired    = TRUE,
+                alternative = "two.sided")
+t_sex
+```
+Null hypothesis is rejected because its p-value is < 0.001.
+The mean paired difference (Male and Female) is –94.94 (95 % CI [–137.6, –52.3]) on average there are about 95 more female victims than male victims per country‐year.
+
+### Difference between Age Group
+The second t-test will be on the topic of these hypothesis:
+Null Hypothesis: “Age groups 17 or younger and 18 or older are victims of human trafficking in equal numbers.”
+Alternative Hypothesis: “Age groups 17 or younger and 18 or older are victims of human trafficking in different amounts.”
+```{r}
+age_totals <- glotip %>%
+  filter(Dimension == "Total",
+         Sex       == "Total",
+         Age %in% c("0 to 17 years","18 years or over")) %>%
+  group_by(Country, Year, Age) %>%
+  summarize(Victims = sum(Count, na.rm=TRUE), .groups="drop") %>%
+  pivot_wider(names_from = Age,
+              values_from = Victims) %>%
+  filter(!is.na(`0 to 17 years`),
+         !is.na(`18 years or over`))
+t_age <- t.test(age_totals$`0 to 17 years`,
+                age_totals$`18 years or over`,
+                paired      = TRUE,
+                alternative = "two.sided")
+t_age
+```
+Null hypothesis is rejected because its p-value is < 0.001.
+The mean paired difference (0 to 17 years and 18 years or over) is –158.65 (95 % CI [–204.4, –112.9]) on average there are roughly 159 more adult victims than children, per country‐year.
+## Linear Regression
+Linear regression is a machine learning tool used for predictions, so it was an obvious choice to use this tool when it came to the research question of predicting the following scenarios: 1. Males 17 years or less in the year 2025. 2. Males 18 years or more in the year 2023. 3. Females 17 years or less in the year 2025. 4. Females 18 years or more in the year 2023.
+```{r}
+global_trend <- glotip %>%
+  filter(Dimension == "Total",
+         Sex %in% c("Male","Female"),
+         Age %in% c("0 to 17 years","18 years or over")) %>%
+  group_by(Sex, Age, Year) %>%
+  summarize(Victims = sum(Count, na.rm = TRUE), .groups = "drop")
+mod_m_u17 <- lm(Victims ~ Year,
+                data = filter(global_trend, Sex=="Male",   Age=="0 to 17 years"))
+mod_m_18p <- lm(Victims ~ Year,
+                data = filter(global_trend, Sex=="Male",   Age=="18 years or over"))
+mod_f_u17 <- lm(Victims ~ Year,
+                data = filter(global_trend, Sex=="Female", Age=="0 to 17 years"))
+mod_f_18p <- lm(Victims ~ Year,
+                data = filter(global_trend, Sex=="Female", Age=="18 years or over"))
+
+
+
+preds <- tibble(
+  Sex   = c("Male",   "Male",     "Female",   "Female"),
+  Age   = c("0 to 17 years", "18 years or over",
+            "0 to 17 years", "18 years or over"),
+  Year  = c(2025,     2023,       2025,       2023),
+  Predicted_Victims = c(
+    predict(mod_m_u17, newdata = data.frame(Year=2025)),
+    predict(mod_m_18p, newdata = data.frame(Year=2023)),
+    predict(mod_f_u17, newdata = data.frame(Year=2025)),
+    predict(mod_f_18p, newdata = data.frame(Year=2023))
+  )
+)
+preds
+```
+Put in the form of a table, the predictions 
+Male, 0–17, in 2025 = estimated 12,638 victims
+According to the model, if current year-to-year trends continue, there will be about 12.6 thousand male victims under 18 in 2025.
+
+Male, 18+ in 2023 = estimated 27,220 victims
+For adult males in 2023, the model predicts 27.2 thousand victims, which shows the growing trend especially amongst those 18 or over as the victims of human trafficking when compared to 17 or under.
+
+Female, 0–17 in 2025 = estimated 13,345 victims
+Predicted count for female victims under 18 in 2025 is slightly higher than the male counterpart of the same age at 13.3 thousand.
+
+Female, 18+ in 2023 = estimated 43,781 victims
+Finally the model predicts that adult females in 2023 are projected at about 43.8 thousand victims significantly higher than adult males. This major disparity highlights this gender and age group's vulnerability to human trafficking, especially when compared to the 3 other subgroups.
+
+# Conclusion
+Throughout this project, I first imported the UNODC global trafficking dataset directly from their .CSV download and then wrestled with the Human Trafficking Hotline data by writing a custom rvest web scrape (since it wasn’t available as a clean API endpoint). Once both sources were in R, I cleaned and reshaped the tables by renaming columns, handling “<5” counts by imputing the midpoint, and dropping redundant columns/data so that I had counts by country, year, sex/gender, and age group. I then visualized global trends with line plots (by gender and by age), ran paired t-tests to confirm that females and adults consistently experience higher victim counts, and finally built four complex maps showing male and female victims 17 or under and 18+ across every country. The closing takeaway from this project is that women aged 18 or over are by far the most vulnerable group to human trafficking worldwide, especially when compared to the other 3 subgroups within the dataset (males 17 or younger, males 18 or over, and females but 17 or younger). Of course, this doesn’t exclude anyone from being a victim to human trafficking.
+
+
+* * *
